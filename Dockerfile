@@ -3,7 +3,7 @@ FROM python:3.12-slim AS builder
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1
 WORKDIR /build
 # psycopg2 se compila contra libpq, sin cambiar las dependencias existentes.
-RUN apt-get update && apt-get install -y --no-install-recommends gcc libpq-dev && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev libpq-dev && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
 RUN pip wheel --wheel-dir=/wheels -r requirements.txt
 
