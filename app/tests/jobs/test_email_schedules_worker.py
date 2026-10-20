@@ -474,7 +474,7 @@ def test_process_specific_date_creates_run_for_each_lease_and_completes(capture_
     assert schedule.status == "completed"
 
 
-def test_process_specific_date_marks_completed_with_errors_on_failure(monkeypatch):
+def test_process_specific_date_marks_failed_on_send_failure(monkeypatch):
     def boom(**kwargs):
         raise RuntimeError("SMTP no disponible")
 
@@ -487,7 +487,35 @@ def test_process_specific_date_marks_completed_with_errors_on_failure(monkeypatc
     worker.process_specific_date_schedule(db=db, schedule=schedule, today=date(2026, 6, 1))
 
     assert db.runs[0].status == "failed"
-    assert schedule.status == "completed_with_errors"
+    # The API accepts failed as the terminal error status for schedules.
+    assert schedule.status == "failed"
+    assert db.runs[0].failed_at is not None
+    assert db.runs[0].error_message == "SMTP no disponible"
+
+
+def test_process_specific_date_marks_failed_if_only_one_send_fails(monkeypatch):
+    attempts = []
+
+    def send_with_one_failure(**kwargs):
+        attempts.append(kwargs["to"])
+        if kwargs["to"] == "failure@example.com":
+            raise RuntimeError("Fixture delivery failure")
+
+    monkeypatch.setattr(worker, "send_email", send_with_one_failure)
+    leases = [
+        make_lease(id=101, client_id=201, client_email="failure@example.com"),
+        make_lease(id=102, client_id=202, client_email="success@example.com"),
+    ]
+    schedule = make_schedule(trigger_type="specific_date", scheduled_for=date(2026, 6, 1))
+    db = FakeDB(worker, leases=leases)
+
+    worker.process_specific_date_schedule(db=db, schedule=schedule, today=date(2026, 6, 1))
+
+    assert attempts == ["failure@example.com", "success@example.com"]
+    assert [run.status for run in db.runs] == ["failed", "sent"]
+    assert db.runs[0].error_message == "Fixture delivery failure"
+    assert db.runs[1].sent_at is not None
+    assert schedule.status == "failed"
 
 
 def test_process_specific_date_completes_with_no_recipients(capture_send_email):
