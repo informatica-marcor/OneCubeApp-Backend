@@ -13,6 +13,7 @@ from collections import OrderedDict
 
 from app.core.config import settings
 from app.core.time import now_tz
+from app.utils.uploads import InvalidUploadPath, resolve_upload_path, public_upload_url
 from app.db.session import get_db
 from app.utils.auth import get_current_user
 from app.utils.devices import get_devices
@@ -51,7 +52,6 @@ router = APIRouter(tags=["users"])
 DBDep = Annotated[Session, Depends(get_db)]
 CurrentUserDep = Annotated[User, Depends(get_current_user)]
 
-UPLOAD_ROOT = Path(settings.root) / "uploads" / "users"
 DEFAULT_PROFILE_PHOTO = Path(settings.root) / "assets" / "default_profile_photo.jpg"
 
 # --- UTILIDADES ---
@@ -73,13 +73,11 @@ def _save_user_photo(*, user_id: int, photo: UploadFile) -> str:
             detail="photo must be image/jpeg or image/png",
         )
 
-    user_dir = UPLOAD_ROOT / str(user_id)
-    user_dir.mkdir(parents=True, exist_ok=True)
-
     ext = ".jpg" if photo.content_type == "image/jpeg" else ".png"
-    out_path = user_dir / f"photo{ext}"
 
     try:
+        out_path = resolve_upload_path(f"users/{user_id}/photo{ext}")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         photo.file.seek(0)
         with out_path.open("wb") as f:
             shutil.copyfileobj(photo.file, f)
@@ -93,15 +91,22 @@ def _save_user_photo(*, user_id: int, photo: UploadFile) -> str:
     logger.info("Photo saved for user_id=%s path=%s", user_id, out_path.as_posix())
     return str(out_path.as_posix())
 
-def _cleanup_file(path: Optional[str]) -> None:
+def _cleanup_file(path: Optional[str], *, keep: Optional[str] = None) -> None:
     if not path:
         return
-
     try:
-        Path(path).unlink(missing_ok=True)
-        logger.info("Cleaned up file path=%s", path)
-    except Exception:
-        logger.exception("Failed to cleanup file path=%s", path)
+        resolved = resolve_upload_path(path)
+        if keep:
+            try:
+                if resolved == resolve_upload_path(keep):
+                    return
+            except InvalidUploadPath:
+                pass
+        resolved.unlink(missing_ok=True)
+    except InvalidUploadPath:
+        logger.warning("Skipped cleanup of invalid upload path")
+    except OSError:
+        logger.exception("Failed to cleanup upload file")
 
 def _validate_exists_email(db: Session, email: Optional[str], *, exclude_user_id: Optional[int] = None) -> None:
     if not email:
@@ -131,18 +136,12 @@ def build_visit_summary(visit) -> VisitOut:
         end_date=visit.valid_to.strftime("%d/%m/%Y %H:%M") if visit.valid_to else None,
     )
 
-def build_public_file_url(file_path: str) -> str:
-    uploads_root = (Path(settings.root) / "uploads").resolve()
-    absolute_file_path = Path(file_path).resolve()
-
-    relative_path = absolute_file_path.relative_to(uploads_root)
-    version = int(absolute_file_path.stat().st_mtime)
-
-    return f"{settings.public_base_url}/uploads/{relative_path.as_posix()}?v={version}"
+def build_public_file_url(file_path: str | Path) -> Optional[str]:
+    return public_upload_url(file_path, versioned=True)
 
 def build_user_out(user) -> UserOut:
     user_image_url = None
-    if user.photo and "default_profile_photo.jpg" not in user.photo:
+    if user.photo:
         user_image_url = build_public_file_url(user.photo)
 
     return UserOut(
@@ -158,7 +157,7 @@ def build_user_out(user) -> UserOut:
 
 def build_temporary_user_out(user) -> TemporaryUserPermissionOut:
     user_image_url = None
-    if user.grantee_user.photo and "default_profile_photo.jpg" not in user.grantee_user.photo:
+    if user.grantee_user.photo:
         user_image_url = build_public_file_url(user.grantee_user.photo)
 
     return TemporaryUserPermissionOut(
@@ -203,24 +202,10 @@ def get_photo_binary(user_id: int, current_user: CurrentUserDep, db: DBDep):
         )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to view this photo")
     
-    if not user_db.photo or not Path(user_db.photo).exists():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Physical photo file not found")
-
-    photo_path = Path(user_db.photo)
-
-    if photo_path.resolve() == DEFAULT_PROFILE_PHOTO.resolve():
-        logger.info("Default photo detected for user_id=%s, returning 404 to trigger initials in UI", user_id)
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, 
-            detail="User has default photo, use initials"
-        )
-
-    if not photo_path.exists():
-        logger.warning("Photo request failed: physical file not found target_user_id=%s", user_id)
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Physical photo file not found")
-
-    test = build_public_file_url(photo_path)
-    return test
+    url = build_public_file_url(user_db.photo)
+    if url is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found")
+    return url
 
 @router.get("/users/{user_id}", response_model=UserOut)
 def read_user(user_id: int, current_user: CurrentUserDep, db: DBDep):
@@ -576,19 +561,13 @@ def create_temporary_user(
     except HTTPException:
         db.rollback()
         if saved_photo_path:
-            try:
-                Path(saved_photo_path).unlink(missing_ok=True)
-            except Exception:
-                logger.exception("Failed to remove saved profile photo path=%s", saved_photo_path)
+            _cleanup_file(saved_photo_path)
         raise
 
     except Exception:
         db.rollback()
         if saved_photo_path:
-            try:
-                Path(saved_photo_path).unlink(missing_ok=True)
-            except Exception:
-                logger.exception("Failed to remove saved profile photo path=%s", saved_photo_path)
+            _cleanup_file(saved_photo_path)
 
         logger.exception("Temporary user creation failed requester_user_id=%s", current_user.id)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error creating temporary user")
@@ -704,8 +683,7 @@ def update_face(
         target_user.updated_by = current_user.id
         db.commit()
 
-        if old_photo and old_photo != saved_path and old_photo != str(DEFAULT_PROFILE_PHOTO):
-            _cleanup_file(old_photo)
+        _cleanup_file(old_photo, keep=saved_path)
 
         logger.info(
             "Face updated successfully target_user_id=%s updated_by=%s",
@@ -717,12 +695,12 @@ def update_face(
     except HTTPException:
         db.rollback()
         if saved_path:
-            _cleanup_file(saved_path)
+            _cleanup_file(saved_path, keep=old_photo)
         raise
     except Exception:
         db.rollback()
         if saved_path:
-            _cleanup_file(saved_path)
+            _cleanup_file(saved_path, keep=old_photo)
         logger.exception(
             "Face update failed target_user_id=%s requester_user_id=%s",
             user_id,
