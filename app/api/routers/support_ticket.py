@@ -13,7 +13,7 @@ from app.db.session import get_db
 from app.models.user import User
 from app.repositories.user_repo import UserRepo
 from app.repositories.support_ticket_repo import SupportTicketRepo
-from app.core.config import settings
+from app.utils.uploads import get_uploads_root, public_upload_url
 from app.schemas.tickets import TicketOut
 
 router = APIRouter(tags=["support_ticket"])
@@ -22,7 +22,7 @@ CurrentUserDep = Annotated[User, Depends(get_current_user)]
 
 logger = logging.getLogger(__name__)
 
-UPLOAD_ROOT = Path(settings.root) / "uploads" / "tickets"
+UPLOAD_ROOT = get_uploads_root() / "tickets"
 
 
 def _ensure_dir(path: Path) -> None:
@@ -126,12 +126,8 @@ def build_ticket(ticket) -> TicketOut:
         resolved_at=ticket.resolved_at.strftime("%d/%m/%Y %H:%M") if ticket.resolved_at else None
     )
 
-def build_public_file_url(file_path: str) -> str:
-    uploads_root = (Path(settings.root) / "uploads").resolve()
-    absolute_file_path = Path(file_path).resolve()
-
-    relative_path = absolute_file_path.relative_to(uploads_root)
-    return f"{settings.public_base_url}/uploads/{relative_path.as_posix()}"
+def build_public_file_url(file_path: str) -> str | None:
+    return public_upload_url(file_path)
 
 def build_ticket_detail(ticket) -> dict:
     return {

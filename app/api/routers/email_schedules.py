@@ -16,12 +16,13 @@ from app.utils.auth import get_current_user
 from app.db.session import get_db
 from app.models.user import User
 from app.core.config import settings
+from app.utils.uploads import get_uploads_root
 
 router = APIRouter(tags=["email_schedules"])
 DBDep = Annotated[Session, Depends(get_db)]
 CurrentUserDep = Annotated[User, Depends(get_current_user)]
 
-UPLOAD_ROOT = Path(settings.root) / "uploads" / "attachments"
+UPLOAD_ROOT = get_uploads_root() / "attachments"
 
 VALID_TRIGGER_TYPES = {
     "immediate",
