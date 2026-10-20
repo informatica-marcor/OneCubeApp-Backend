@@ -141,14 +141,14 @@ def build_ticket_detail(ticket) -> dict:
         "reply": ticket.reply,
         "resolved_at": ticket.resolved_at.strftime("%d/%m/%Y %H:%M") if ticket.resolved_at else None,
         "images": [
-            build_public_file_url(path)
+            url
             for path in (ticket.evidence or [])
-            if path
+            if path and (url := build_public_file_url(path)) is not None
         ],
         "reply_images": [
-            build_public_file_url(path)
+            url
             for path in (ticket.reply_evidence or [])
-            if path
+            if path and (url := build_public_file_url(path)) is not None
         ],
     }
 

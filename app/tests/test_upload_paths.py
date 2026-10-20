@@ -278,3 +278,34 @@ def test_static_mount_uses_effective_root(storage, monkeypatch):
         response = client.get("/uploads/users/7/photo.jpg")
     assert response.status_code == 200
     assert response.content == b"fixture image"
+
+
+@pytest.mark.parametrize("empty", [None, []])
+def test_ticket_detail_filters_unavailable_images(storage, empty):
+    from datetime import datetime
+
+    write_photo(storage, "tickets/1/created/first.jpg")
+    write_photo(storage, "tickets/1/resolved/second.jpg")
+    ticket = SimpleNamespace(
+        id=1, user_id=7, user=SimpleNamespace(name="Fixture"),
+        subject="Fixture ticket", description="Fixture description",
+        created_at=datetime(2026, 10, 20), reply_user_id=None,
+        reply=None, resolved_at=None,
+        evidence=[None, "", "tickets/1/missing.jpg", "../outside.jpg",
+                  "/var/www/onecube/uploads/tickets/1/created/first.jpg",
+                  "https://example.com/photo.jpg", "tickets/1/resolved/second.jpg"],
+        reply_evidence=["tickets/1/resolved/second.jpg", "tickets/1/missing.jpg",
+                        "../outside.jpg", None],
+    )
+    result = support_ticket.build_ticket_detail(ticket)
+    assert result["images"] == [
+        "https://app.onecube.cl/uploads/tickets/1/created/first.jpg",
+        "https://app.onecube.cl/uploads/tickets/1/resolved/second.jpg",
+    ]
+    assert result["reply_images"] == [
+        "https://app.onecube.cl/uploads/tickets/1/resolved/second.jpg",
+    ]
+    ticket.evidence = ticket.reply_evidence = empty
+    result = support_ticket.build_ticket_detail(ticket)
+    assert result["images"] == []
+    assert result["reply_images"] == []
